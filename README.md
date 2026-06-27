@@ -1,389 +1,128 @@
-# Three-Way Match Engine — PO, GRN, Invoice
-
-A backend service that parses Purchase Order, Goods Receipt Note, and Invoice PDFs using an LLM, stores structured data in MongoDB, and performs a three-way match validation.
-
+---
+name: @VivekJadhav2001-coding-skill
+description: "GitHub profile skill from @VivekJadhav2001. Use it when the task would benefit from mimicking this developer's repo choices, coding style, and implementation techniques."
 ---
 
-## Tech Stack
-
-- **Node.js + Express** — REST API
-- **MongoDB + Mongoose** — data storage
-- **NVIDIA API (LLaMA 3.3-70B)** — document parsing
-- **pdf-parse** — PDF text extraction
-- **multer** — file upload handling
-
----
-
-## Setup
-
-```bash
-cd backend
-npm install
-```
-
-Create a `.env` file:
-
-```
-PORT=3000
-DB_URI=mongodb://localhost:27017/finifi
-NVIDIA_API_KEY=your_key_here
-```
-
-```bash
-npm start
-```
-
----
-
-## API Reference
-
-### 1. Upload Document
-
-**POST** `/api/v1/documents/upload`
-
-| Field | Type | Description |
-|---|---|---|
-| `file` | File (PDF) | The document to upload |
-| `documentType` | string | `po`, `grn`, or `invoice` |
-
-### 2. Get Document by ID
-
-**GET** `/api/v1/documents/:id`
-
-Returns the stored document with its parsed JSON data.
-
-### 3. Get All Documents
-
-**GET** `/api/v1/documents`
-
-Returns all uploaded documents sorted by latest first.
-
-### 4. Get Three-Way Match Result
-
-**GET** `/api/v1/match/:poNumber`
-
-Returns the current match state for a given PO number.
-
----
-
-## Data Model
-
-All documents are stored in two places:
-
-1. **`documents` collection** — generic record with `status`, `parsedData`, `poNumber`. Acts as an audit log for every upload.
-2. **Specific collections** — `pos`, `grns`, `invoices` — for structured querying and matching.
-
-This separation makes querying by `poNumber` across types fast and clean.
-
----
-
-## Parsing Flow
-
-1. User uploads a PDF with `documentType`
-2. `pdf-parse` extracts raw text from the PDF
-3. The text is sent to the LLM with a type-specific prompt
-4. The LLM returns structured JSON
-5. JSON is saved to both the `Document` record and the type-specific collection (Po / Grn / Invoice)
-6. Matching is triggered automatically for the `poNumber`
-
----
-
-## Item Matching Key
-
-**Primary key: `itemCode` (SKU)**
-
-Item codes are used as the matching key across PO, GRN, and Invoice documents. This is the most reliable identifier because description text varies between documents (abbreviations, spacing, typos) while item codes are consistent. If `itemCode` is null, the system falls back to normalized `description` (lowercased, trimmed, whitespace-collapsed).
-
----
-
-## Matching Logic
-
-Matching runs at the **item level** for every `poNumber`.
-
-**Rules validated:**
-
-| Rule | Error Code |
-|---|---|
-| GRN received qty > PO ordered qty | `grn_qty_exceeds_po_qty` |
-| Invoice qty > total GRN received qty | `invoice_qty_exceeds_grn_qty` |
-| Invoice qty > PO ordered qty | `invoice_qty_exceeds_po_qty` |
-| Invoice date is after PO date | `invoice_date_after_po_date` |
-| Item in GRN/Invoice not found in PO | `item_missing_in_po` |
-
-**Status values:**
-
-| Status | Meaning |
-|---|---|
-| `matched` | All items and dates pass all rules with exact quantities |
-| `partially_matched` | Some items pass, some fail — or partial delivery |
-| `mismatch` | All items have rule violations |
-| `insufficient_documents` | PO, GRN, or Invoice not yet uploaded |
-
-Multiple GRNs and Invoices for the same PO are **aggregated** before comparison.
-
----
-
-## Out-of-Order Upload Handling
-
-Documents are stored independently as soon as they are parsed — no document waits for another. When any document is uploaded, the system saves it immediately and calls `runMatch(poNumber)` which fetches whatever documents exist for that PO at that moment.
-
-So if an Invoice arrives before the PO, it gets saved and the match returns `insufficient_documents`. Once all three are uploaded in any order, `GET /match/:poNumber` returns the full result.
-
----
-
-## Example Outputs
-
-### Upload PO — `POST /api/v1/documents/upload`
-
-Request: `file = PO.pdf`, `documentType = po`
-
-Response (showing first 3 of 39 items for brevity):
-
-```json
-{
-    "success": true,
-    "documentId": "69c9f12365053cf2f0c7918a",
-    "data": {
-        "poNumber": "CI4PO05788",
-        "poDate": "Mar 17, 2026",
-        "vendorName": "CLOUDSTORE RETAIL PRIVATE LIMITED",
-        "items": [
-            {
-                "itemCode": "Cheesy Spicy Veg Momos",
-                "description": "Colour: Size: size Brand:Band_2",
-                "quantity": 50,
-                "unitPrice": 305,
-                "taxableValue": 11038.1
-            },
-            {
-                "itemCode": "11797",
-                "description": "Meatigo Hot Wings 250.0 g Colour: Size: size Brand:Band_3",
-                "quantity": 75,
-                "unitPrice": 175,
-                "taxableValue": 9500
-            },
-            {
-                "itemCode": "18003",
-                "description": "Meatigo Chicken Curry Cut Skinless Frozen 450.0 g Colour: Size: size Brand:Band_1",
-                "quantity": 120,
-                "unitPrice": 195,
-                "taxableValue": 16937.14
-            },
-            {},{},.....
-        ]
-    }
-}
-```
-
----
-
-### Get Document by ID — `GET /api/v1/documents/:id`
-
-```json
-{
-    "success": true,
-    "data": {
-        "_id": "69c9f12365053cf2f0c7918a",
-        "originalName": "PO.pdf",
-        "documentType": "po",
-        "status": "parsed",
-        "parseError": null,
-        "createdAt": "2026-03-30T03:42:27.154Z",
-        "updatedAt": "2026-03-30T03:46:56.301Z",
-        "__v": 0,
-        "parsedData": {
-            "poNumber": "CI4PO05788",
-            "poDate": "Mar 17, 2026",
-            "vendorName": "CLOUDSTORE RETAIL PRIVATE LIMITED",
-            "items": [
-                {
-                    "itemCode": "Cheesy Spicy Veg Momos",
-                    "description": "Colour: Size: size Brand:Band_2",
-                    "quantity": 50,
-                    "unitPrice": 305,
-                    "taxableValue": 11038.1
-                },
-                {
-                    "itemCode": "11797",
-                    "description": "Meatigo Hot Wings 250.0 g Colour: Size: size Brand:Band_3",
-                    "quantity": 75,
-                    "unitPrice": 175,
-                    "taxableValue": 9500
-                },
-                {
-                    "itemCode": "18003",
-                    "description": "Meatigo Chicken Curry Cut Skinless Frozen 450.0 g Colour: Size: size Brand:Band_1",
-                    "quantity": 120,
-                    "unitPrice": 195,
-                    "taxableValue": 16937.14
-                },
-            ]
-        },
-        "parsedDocId": "69c9f23065053cf2f0c7918f",
-        "parsedModel": "Po",
-        "poNumber": "CI4PO05788"
-    }
-}
-```
-
----
-
-### Get All Documents — `GET /api/v1/documents`
-
-```json
-{
-    "success": true,
-    "count": 2,
-    "data": [
-        {
-            "_id": "69c9f12365053cf2f0c7918a",
-            "originalName": "PO.pdf",
-            "documentType": "po",
-            "status": "pending",
-            "parseError": null,
-            "createdAt": "2026-03-30T03:42:27.154Z",
-            "updatedAt": "2026-03-30T03:42:27.154Z",
-            "__v": 0
-        },
-        {
-            "_id": "69c7d4f8983073f3004b7aaa",
-            "originalName": "PO.pdf",
-            "documentType": "po",
-            "status": "parsed",
-            "parseError": null,
-            "createdAt": "2026-03-28T13:17:44.175Z",
-            "updatedAt": "2026-03-28T13:18:51.964Z",
-            "__v": 0,
-            "parsedData": {
-                "poNumber": "CI4PO05788",
-                "poDate": "Mar 17, 2026",
-                "vendorName": "CLOUDSTORE RETAIL PRIVATE LIMITED",
-                "items": []
-            },
-            "poNumber": "CI4PO05788"
-        }
-    ]
-}
-```
-
----
-
-### Match Result (PO only uploaded) — `GET /api/v1/match/CI4PO05788`
-
-```json
-{
-    "success": true,
-    "data": {
-        "poNumber": "CI4PO05788",
-        "status": "insufficient_documents",
-        "po": {
-            "_id": "69c9f23065053cf2f0c7918f",
-            "poNumber": "CI4PO05788",
-            "poDate": "Mar 17, 2026",
-            "vendorName": "CLOUDSTORE RETAIL PRIVATE LIMITED",
-            "items": [
-                {
-                    "itemCode": "Cheesy Spicy Veg Momos",
-                    "description": "Colour: Size: size Brand:Band_2",
-                    "quantity": 50,
-                    "receivedQuantity": 0,
-                    "unitPrice": 305,
-                    "taxableValue": 11038.1
-                },
-                {
-                    "itemCode": "11797",
-                    "description": "Meatigo Hot Wings 250.0 g Colour: Size: size Brand:Band_3",
-                    "quantity": 75,
-                    "receivedQuantity": 0,
-                    "unitPrice": 175,
-                    "taxableValue": 9500
-                },
-                {
-                    "itemCode": "18003",
-                    "description": "Meatigo Chicken Curry Cut Skinless Frozen 450.0 g Colour: Size: size Brand:Band_1",
-                    "quantity": 120,
-                    "receivedQuantity": 0,
-                    "unitPrice": 195,
-                    "taxableValue": 16937.14
-                },{},{}....
-            ],
-            "documentId": "69c9f12365053cf2f0c7918a",
-            "createdAt": "2026-03-30T03:46:56.240Z",
-            "updatedAt": "2026-03-30T03:46:56.240Z",
-            "__v": 0
-        },
-        "grns": [
-            {
-                "_id": "69c9f76865053cf2f0c7919d",
-                "grnNumber": "CI4000020234",
-                "poNumber": "CI4PO05788",
-                "grnDate": "24-3-2026",
-                "items": [
-                    {
-                        "itemCode": "11423",
-                        "description": "Spicy Veg Momos",
-                        "quantity": 0,
-                        "receivedQuantity": 50,
-                        "unitPrice": 220.76,
-                        "taxableValue": 11038.1
-                    },
-                    {
-                        "itemCode": "11797",
-                        "description": "Meatigo Hot Wings",
-                        "quantity": 0,
-                        "receivedQuantity": 75,
-                        "unitPrice": 126.67,
-                        "taxableValue": 9500.03
-                    },
-                    {
-                        "itemCode": "18003",
-                        "description": "Meatigo Chicken Curry Cut Skinless Frozen",
-                        "quantity": 0,
-                        "receivedQuantity": 30,
-                        "unitPrice": 141.14,
-                        "taxableValue": 4234.29
-                    },
-                    {},{}......
-                ],
-                "documentId": "69c9f6bb65053cf2f0c7919b",
-                "createdAt": "2026-03-30T04:09:12.325Z",
-                "updatedAt": "2026-03-30T04:09:12.325Z",
-                "__v": 0
-            }
-        ],
-        "invoices": [],
-        "reasons": [
-            "invoice_not_uploaded"
-        ],
-        "itemDetails": []
-    }
-}
-```
-
----
-
-## Assumptions
-
-- One PO per `poNumber` — duplicate POs are rejected with a `409` response
-- Dates are in `DD-MM-YYYY` or `YYYY-MM-DD` format; other formats are treated as null for date comparison
-- If `itemCode` is missing in the parsed data, `description` is used as the fallback matching key
-- The LLM may occasionally return slightly different `itemCode` values across documents for the same item — this is a known limitation of text extraction from PDFs
-
----
-
-## Tradeoffs
-
-- **Single `documents` collection + separate typed collections** — slightly redundant storage but gives both a clean audit log and fast type-specific querying
-- **Matching is on-demand** (`GET /match/:poNumber` always recomputes from current DB state) — simple and always correct; for high scale you'd cache results and invalidate on new uploads
-- **No authentication** — out of scope for this assignment
-
----
-
-## What I Would Improve With More Time
-
-- Add a `MatchResult` collection to persist and track match history over time
-- Add Swagger / OpenAPI documentation
-- Add unit tests for the match engine (partial delivery, duplicate GRNs, out-of-order scenarios)
-- Support scanned / image-based PDFs using OCR before LLM parsing
-- Add pagination to `GET /documents`
-- Implement a webhook or event system to notify when match status changes
+## What they tend to build
+
+- Full-stack MERN apps with a practical, portfolio-friendly scope: resume builders, finance trackers, blogs, dashboards, and “explorer” style utility apps.
+- Products that feel production-minded rather than toy demos: AI-assisted workflows, editable content, PDF export, ATS/resume optimization, and real-world CRUD.
+- Apps that combine a polished frontend with a lightweight backend: `frontend/` + `backend/` separation is common in the bigger repos.
+- Features aimed at usefulness and speed:
+  - AI content generation
+  - rich text editing
+  - export/download flows
+  - dashboards and analytics-style views
+  - form-heavy user flows
+
+## Coding patterns to mirror
+
+- Prefer a clean split between app layers:
+  - `frontend/src/components`, `pages`, `features`, `utils`, `app`
+  - `backend/routes`, server entrypoints, small focused route modules
+- Default to React + Vite with modern patterns:
+  - React Router for navigation
+  - Redux Toolkit for shared state
+  - Tailwind CSS for styling
+  - small reusable UI pieces instead of large monolith components
+- For form-heavy flows, use the same “app product” approach seen in their repos:
+  - react-hook-form where useful
+  - controlled inputs and explicit validation
+  - toast-based feedback for actions
+- Handle user-facing complexity explicitly:
+  - error boundaries
+  - loading states
+  - notification toasts
+  - export/download helpers
+- Keep utility code nearby and readable:
+  - constants in separate files
+  - API helpers isolated from components
+  - feature-specific logic grouped together
+- Use straightforward, descriptive naming over abstraction-heavy patterns.
+
+## Product and UI taste
+
+- Strong preference for clean, modern, utility-first interfaces.
+- UI work is usually oriented around clarity and productivity:
+  - ATS-friendly resume layouts
+  - editable content surfaces
+  - dashboard-like summaries
+  - structured forms and sections
+- They appear comfortable with richer UI tooling when it supports the product:
+  - TinyMCE for editing
+  - React Flow for interactive layouts
+  - charting and icons for interface polish
+- The overall taste is practical: “make the workflow easier” rather than decorative UI.
+
+## Tech stack clues
+
+- Main stack is JavaScript-first, with some TypeScript projects present.
+- Frontend:
+  - React
+  - Vite
+  - React Router DOM
+  - Redux Toolkit / React Redux
+  - Tailwind CSS
+  - React Icons
+  - Chakra UI appears in the profile stack
+  - Chart.js
+- Backend:
+  - Node.js
+  - Express
+  - JWT
+  - MongoDB
+- Third-party/platform tools seen in the profile and repos:
+  - Appwrite
+  - Supabase
+  - GROQ / LLaMA API
+  - AWS
+  - Render
+  - Vercel
+- Common tooling:
+  - ESLint
+  - PostCSS / Tailwind config
+  - npm scripts centered on `dev`, `build`, `lint`, `preview`
+
+## When to inspect repos first
+
+- Before generating code for anything involving:
+  - Redux Toolkit store shape
+  - routing structure
+  - backend route naming
+  - Appwrite integration
+  - AI API calls
+  - PDF export or resume rendering
+- Before matching their folder conventions in a new app:
+  - their repos vary between simple React apps and split frontend/backend structures
+  - inspect `package.json` and root directories first to infer architecture
+- Before writing UI for forms, editors, or dashboards:
+  - the implementation style is likely feature-specific and component-driven
+  - the exact dependencies matter a lot here (`TinyMCE`, `react-hook-form`, `react-router-dom`, PDF libs, etc.)
+- Before choosing state management:
+  - some repos use Redux Toolkit heavily, but not every repo needs it
+  - inspect existing patterns rather than assuming a single canonical setup
+
+## Repo Map
+
+- [VivekJadhav2001/AI_Resume_Builder](https://github.com/VivekJadhav2001/AI_Resume_Builder): AI resume builder (2 stars, JavaScript, topics: express, gemini-api, javascript, nodejs)
+- [VivekJadhav2001/Connexa](https://github.com/VivekJadhav2001/Connexa) (0 stars, JavaScript, topics: css, expressjs, filesystem, html)
+- [VivekJadhav2001/Match-My-Resume](https://github.com/VivekJadhav2001/Match-My-Resume) (0 stars, JavaScript)
+- [VivekJadhav2001/Personal-Finance-Tracker-](https://github.com/VivekJadhav2001/Personal-Finance-Tracker-) (1 stars, JavaScript)
+- [VivekJadhav2001/AppWriteBlog](https://github.com/VivekJadhav2001/AppWriteBlog) (1 stars, JavaScript)
+- [VivekJadhav2001/FrontEnd-Grocery-App](https://github.com/VivekJadhav2001/FrontEnd-Grocery-App) (0 stars, TypeScript)
+- [VivekJadhav2001/Educase-Assignment](https://github.com/VivekJadhav2001/Educase-Assignment) (0 stars, JavaScript)
+- [VivekJadhav2001/TypeScript](https://github.com/VivekJadhav2001/TypeScript) (0 stars, TypeScript)
+- [VivekJadhav2001/Portfolio-Dashboard](https://github.com/VivekJadhav2001/Portfolio-Dashboard) (0 stars, JavaScript)
+- [VivekJadhav2001/Github-Explorer](https://github.com/VivekJadhav2001/Github-Explorer): Live Link for Github Explorer (0 stars, JavaScript, topics: javascript, react, reacticons, reactrouterdom)
+- [VivekJadhav2001/zorvyn-finance-dashboard](https://github.com/VivekJadhav2001/zorvyn-finance-dashboard) (0 stars, JavaScript)
+- [VivekJadhav2001/three-way-match-engine](https://github.com/VivekJadhav2001/three-way-match-engine) (0 stars, JavaScript)
+- [VivekJadhav2001/VivekJadhav2001](https://github.com/VivekJadhav2001/VivekJadhav2001) (0 stars)
+
+## How To Use This Skill
+
+- Reach for this skill when the user asks for Vivek Jadhav's style, when the repo stack matches this person's ecosystem, or when studying their real code would reduce made-up output.
+- Pick one or more relevant repositories from the list above based on the current task.
+- Clone the most relevant repository or repositories into `/tmp` for temporary inspection.
+- Study the implementation details, naming patterns, architecture, UI taste, and tooling choices there.
+- Return to the main task and apply the useful patterns you observed instead of copying blindly.
+- Treat the upstream repositories as reference material for style and technique, then adapt them to the current codebase responsibly.
